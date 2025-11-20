@@ -18,6 +18,7 @@ export const DOCUMENTATION_FATAL_ERROR_LINK = `${DOCUMENTATION_LINK}#what-happen
 
 export const COVERAGE_DIRECTORY = 'coverage';
 
+<<<<<<< HEAD
 export const SUPPORTED_FRAMEWORKS = [
   '@storybook/nextjs',
   '@storybook/nextjs-vite',
@@ -31,6 +32,8 @@ export const SUPPORTED_FRAMEWORKS = [
   '@storybook/react-native-web-vite',
 ];
 
+=======
+>>>>>>> upstream/next
 export const storeOptions = {
   id: ADDON_ID,
   initialState: {

@@ -1,35 +1,10 @@
-import { execSync } from 'node:child_process';
-import fs from 'node:fs/promises';
-
-import * as babel from 'storybook/internal/babel';
-import {
-  type Builder,
-  type NpmOptions,
-  ProjectType,
-  type Settings,
-  detect,
-  detectLanguage,
-  detectPnp,
-  globalSettings,
-  installableProjectTypes,
-  isStorybookInstantiated,
-} from 'storybook/internal/cli';
-import {
-  HandledError,
-  type JsPackageManager,
-  JsPackageManagerFactory,
-  commandLog,
-  getProjectRoot,
-  invalidateProjectRootCache,
-  isCI,
-  paddedLog,
-  versions,
-} from 'storybook/internal/common';
+import { ProjectType } from 'storybook/internal/cli';
+import { type JsPackageManager, executeCommand } from 'storybook/internal/common';
 import { withTelemetry } from 'storybook/internal/core-server';
-import { deprecate, logger } from 'storybook/internal/node-logger';
-import { NxProjectDetectedError } from 'storybook/internal/server-errors';
-import { telemetry } from 'storybook/internal/telemetry';
+import { logTracker, logger } from 'storybook/internal/node-logger';
+import { ErrorCollector } from 'storybook/internal/telemetry';
 
+<<<<<<< HEAD
 import boxen from 'boxen';
 import * as find from 'empathic/find';
 // eslint-disable-next-line depend/ban-dependencies
@@ -295,411 +270,109 @@ interface PromptOptions {
 }
 
 type InstallType = 'recommended' | 'light';
+=======
+import {
+  executeAddonConfiguration,
+  executeDependencyInstallation,
+  executeFinalization,
+  executeFrameworkDetection,
+  executeGeneratorExecution,
+  executePreflightCheck,
+  executeProjectDetection,
+  executeUserPreferences,
+} from './commands';
+import { DependencyCollector } from './dependency-collector';
+import { registerAllGenerators } from './generators';
+import type { CommandOptions } from './generators/types';
+import { FeatureCompatibilityService } from './services/FeatureCompatibilityService';
+import { TelemetryService } from './services/TelemetryService';
+>>>>>>> upstream/next
 
 /**
- * Prompt the user whether they are a new user and whether to include onboarding. Return whether or
- * not this is a new user.
+ * Main entry point for Storybook initialization
  *
- * ```
- *  New to Storybook?
- *  > Yes: Help me with onboarding
- *    No: Skip onboarding & don't ask me again
- * ```
+ * This is a clean, command-based orchestration that replaces the monolithic 986-line implementation
+ * with a modular, testable approach.
  */
-export const promptNewUser = async ({
-  settings,
-  skipPrompt,
-  disableTelemetry,
-}: PromptOptions): Promise<boolean | undefined> => {
-  const { skipOnboarding } = settings.value.init || {};
-
-  if (!skipPrompt && !skipOnboarding) {
-    const { newUser } = await prompts({
-      type: 'select',
-      name: 'newUser',
-      message: 'New to Storybook?',
-      choices: [
-        {
-          title: `${picocolors.bold('Yes:')} Help me with onboarding`,
-          value: true,
-        },
-        {
-          title: `${picocolors.bold('No:')} Skip onboarding & don't ask again`,
-          value: false,
-        },
-      ],
-    });
-
-    if (typeof newUser === 'undefined') {
-      return newUser;
-    }
-
-    settings.value.init ||= {};
-    settings.value.init.skipOnboarding = !newUser;
-  } else {
-    //  true if new user and not interactive, false if interactive
-    settings.value.init ||= {};
-    settings.value.init.skipOnboarding = !!skipOnboarding;
-  }
-
-  const newUser = !settings.value.init.skipOnboarding;
-  if (!disableTelemetry) {
-    await telemetry('init-step', {
-      step: 'new-user-check',
-      newUser,
-    });
-  }
-
-  return newUser;
-};
-
-/**
- * Prompt the user to choose the configuration to install.
- *
- * ```
- * What configuration should we install?
- *  > Recommended: Component dev, docs, test
- *    Minimal: Dev only
- * ```
- */
-export const promptInstallType = async ({
-  skipPrompt,
-  disableTelemetry,
-  projectType,
-}: PromptOptions): Promise<InstallType | undefined> => {
-  let installType = 'recommended' as InstallType;
-  if (!skipPrompt && projectType !== ProjectType.REACT_NATIVE) {
-    const { configuration } = await prompts({
-      type: 'select',
-      name: 'configuration',
-      message: 'What configuration should we install?',
-      choices: [
-        {
-          title: `${picocolors.bold('Recommended:')} Component dev, docs, test`,
-          value: 'recommended',
-        },
-        {
-          title: `${picocolors.bold('Minimal:')} Component dev only`,
-          value: 'light',
-        },
-      ],
-    });
-    if (typeof configuration === 'undefined') {
-      return configuration;
-    }
-    installType = configuration;
-  }
-  if (!disableTelemetry) {
-    await telemetry('init-step', { step: 'install-type', installType });
-  }
-  return installType;
-};
-
-export function getStorybookVersionFromAncestry(
-  ancestry: ReturnType<typeof getProcessAncestry>
-): string | undefined {
-  for (const ancestor of ancestry.toReversed()) {
-    const match = ancestor.command?.match(/\s(?:create-storybook|storybook)@([^\s]+)/);
-    if (match) {
-      return match[1];
-    }
-  }
-  return undefined;
-}
-
-export function getCliIntegrationFromAncestry(
-  ancestry: ReturnType<typeof getProcessAncestry>
-): string | undefined {
-  for (const ancestor of ancestry.toReversed()) {
-    const match = ancestor.command?.match(/\s(sv(@[^ ]+)? create|sv(@[^ ]+)? add)/i);
-    if (match) {
-      return match[1].includes('add') ? 'sv add' : 'sv create';
-    }
-  }
-  return undefined;
-}
-
 export async function doInitiate(options: CommandOptions): Promise<
   | {
       shouldRunDev: true;
       shouldOnboard: boolean;
       projectType: ProjectType;
       packageManager: JsPackageManager;
-      storybookCommand: string;
+      storybookCommand?: string | null;
     }
   | { shouldRunDev: false }
 > {
-  const { packageManager: pkgMgr } = options;
+  // Initialize services
+  const telemetryService = new TelemetryService(options.disableTelemetry);
 
-  const isEmptyDirProject = options.force !== true && currentDirectoryIsEmpty();
-  let packageManagerType = JsPackageManagerFactory.getPackageManagerType();
+  // Register all framework generators
+  registerAllGenerators();
 
-  // Check if the current directory is empty.
-  if (isEmptyDirProject) {
-    // Initializing Storybook in an empty directory with yarn1
-    // will very likely fail due to different kinds of hoisting issues
-    // which doesn't get fixed anymore in yarn1.
-    // We will fallback to npm in this case.
-    if (packageManagerType === 'yarn1') {
-      packageManagerType = 'npm';
-    }
+  let dependencyCollector: DependencyCollector | null = new DependencyCollector();
 
-    // Prompt the user to create a new project from our list.
-    await scaffoldNewProject(packageManagerType, options);
-    invalidateProjectRootCache();
-  }
+  // Step 1: Run preflight checks
+  const { packageManager } = await executePreflightCheck(options);
 
-  const packageManager = JsPackageManagerFactory.getPackageManager({
-    force: pkgMgr,
-  });
+  // Step 2: Detect project type
+  const { projectType, language } = await executeProjectDetection(packageManager, options);
 
-  if (!options.skipInstall) {
-    await packageManager.installDependencies();
-  }
-
-  const latestVersion = (await packageManager.latestVersion('storybook'))!;
-  const currentVersion = versions.storybook;
-  const isPrerelease = prerelease(currentVersion);
-  const isOutdated = lt(currentVersion, latestVersion);
-  const borderColor = isOutdated ? '#FC521F' : '#F1618C';
-  let versionSpecifier = undefined;
-  let cliIntegration = undefined;
-  try {
-    const ancestry = getProcessAncestry();
-    versionSpecifier = getStorybookVersionFromAncestry(ancestry);
-    cliIntegration = getCliIntegrationFromAncestry(ancestry);
-  } catch (err) {
-    //
-  }
-
-  const messages = {
-    welcome: `Adding Storybook version ${picocolors.bold(currentVersion)} to your project..`,
-    notLatest: picocolors.red(dedent`
-      This version is behind the latest release, which is: ${picocolors.bold(latestVersion)}!
-      You likely ran the init command through npx, which can use a locally cached version, to get the latest please run:
-      ${picocolors.bold('npx storybook@latest init')}
-
-      You may want to CTRL+C to stop, and run with the latest version instead.
-    `),
-    prelease: picocolors.yellow('This is a pre-release version.'),
-  };
-
-  logger.log(
-    boxen(
-      [messages.welcome]
-        .concat(isOutdated && !isPrerelease ? [messages.notLatest] : [])
-        .concat(isPrerelease ? [messages.prelease] : [])
-        .join('\n'),
-      { borderStyle: 'round', padding: 1, borderColor }
-    )
+  // Step 3: Detect framework, renderer, and builder
+  const { framework, builder, renderer } = await executeFrameworkDetection(
+    projectType,
+    packageManager,
+    options
   );
 
-  const isInteractive = process.stdout.isTTY && !isCI();
+  // Step 4: Get user preferences and feature selections (with framework/builder for validation)
+  const { newUser, selectedFeatures } = await executeUserPreferences(packageManager, {
+    options,
+    framework,
+    builder,
+    projectType,
+  });
 
-  const settings = await globalSettings();
-  const promptOptions = {
-    ...options,
-    settings,
-    skipPrompt: !isInteractive || options.yes,
-    projectType: options.type,
-  };
-  const newUser = await promptNewUser(promptOptions);
+  // Step 5: Execute generator with dependency collector (now with frameworkInfo)
 
-  try {
-    await settings.save();
-  } catch (err) {
-    logger.warn(`Failed to save user settings: ${err}`);
-  }
-
-  if (typeof newUser === 'undefined') {
-    logger.log('canceling');
-    process.exit(0);
-  }
-
-  let installType = 'recommended' as InstallType;
-  if (!newUser) {
-    const install = await promptInstallType(promptOptions);
-    if (typeof install === 'undefined') {
-      logger.log('canceling');
-      process.exit(0);
-    }
-    installType = install;
-  }
-
-  let selectedFeatures = new Set<GeneratorFeature>(options.features || []);
-  if (installType === 'recommended') {
-    selectedFeatures.add('docs');
-    // Don't install in CI but install in non-TTY environments like agentic installs
-    if (!isCI()) {
-      selectedFeatures.add('test');
-    }
-    if (newUser) {
-      selectedFeatures.add('onboarding');
-    }
-  }
-
-  const telemetryFeatures = {
-    dev: true,
-    docs: selectedFeatures.has('docs'),
-    test: selectedFeatures.has('test'),
-    onboarding: selectedFeatures.has('onboarding'),
-  };
-
-  let projectType: ProjectType;
-  const projectTypeProvided = options.type;
-  const infoText = projectTypeProvided
-    ? `Installing Storybook for user specified project type: ${projectTypeProvided}`
-    : 'Detecting project type';
-  const done = commandLog(infoText);
-
-  if (projectTypeProvided) {
-    if (installableProjectTypes.includes(projectTypeProvided)) {
-      projectType = projectTypeProvided.toUpperCase() as ProjectType;
-    } else {
-      done(`The provided project type was not recognized by Storybook: ${projectTypeProvided}`);
-      logger.log(`\nThe project types currently supported by Storybook are:\n`);
-      installableProjectTypes.sort().forEach((framework) => paddedLog(`- ${framework}`));
-      logger.log('');
-      throw new HandledError(`Unknown project type supplied: ${projectTypeProvided}`);
-    }
-  } else {
-    try {
-      projectType = (await detect(packageManager as any, options)) as ProjectType;
-
-      if (projectType === ProjectType.REACT_NATIVE && !options.yes) {
-        const { manualType } = await prompts({
-          type: 'select',
-          name: 'manualType',
-          message: "We've detected a React Native project. Install:",
-          choices: [
-            {
-              title: `${picocolors.bold('React Native')}: Storybook on your device/simulator`,
-              value: ProjectType.REACT_NATIVE,
-            },
-            {
-              title: `${picocolors.bold('React Native Web')}: Storybook on web for docs, test, and sharing`,
-              value: ProjectType.REACT_NATIVE_WEB,
-            },
-            {
-              title: `${picocolors.bold('Both')}: Add both native and web Storybooks`,
-              value: ProjectType.REACT_NATIVE_AND_RNW,
-            },
-          ],
-        });
-        projectType = manualType;
-      }
-    } catch (err) {
-      console.log(err);
-      done(String(err));
-      throw new HandledError(err);
-    }
-  }
-  done();
-
-  const storybookInstantiated = isStorybookInstantiated();
-
-  if (options.force === false && storybookInstantiated && projectType !== ProjectType.ANGULAR) {
-    logger.log('');
-    const { force } = await prompts([
-      {
-        type: 'confirm',
-        name: 'force',
-        message:
-          'We found a .storybook config directory in your project. Therefore we assume that Storybook is already instantiated for your project. Do you still want to continue and force the initialization?',
-      },
-    ]);
-    logger.log('');
-
-    if (force) {
-      options.force = true;
-    } else {
-      process.exit(0);
-    }
-  }
-
-  if (selectedFeatures.has('test')) {
-    const packageVersionsData = await packageVersions.condition({ packageManager }, {} as any);
-    if (packageVersionsData.type === 'incompatible') {
-      const { ignorePackageVersions } = isInteractive
-        ? await prompts([
-            {
-              type: 'confirm',
-              name: 'ignorePackageVersions',
-              message: dedent`
-                ${packageVersionsData.reasons.join('\n')}
-                Do you want to continue without Storybook's testing features?
-              `,
-            },
-          ])
-        : { ignorePackageVersions: true };
-      if (ignorePackageVersions) {
-        selectedFeatures.delete('test');
-      } else {
-        process.exit(0);
-      }
-    }
-
-    const vitestConfigFilesData = await vitestConfigFiles.condition(
-      { babel, empathic: find, fs } as any,
-      { directory: process.cwd() } as any
-    );
-    if (vitestConfigFilesData.type === 'incompatible') {
-      const { ignoreVitestConfigFiles } = isInteractive
-        ? await prompts([
-            {
-              type: 'confirm',
-              name: 'ignoreVitestConfigFiles',
-              message: dedent`
-                ${vitestConfigFilesData.reasons.join('\n')}
-                Do you want to continue without Storybook's testing features?
-              `,
-            },
-          ])
-        : { ignoreVitestConfigFiles: true };
-      if (ignoreVitestConfigFiles) {
-        selectedFeatures.delete('test');
-      } else {
-        process.exit(0);
-      }
-    }
-  }
-
-  if (selectedFeatures.has('onboarding') && !ONBOARDING_PROJECT_TYPES.includes(projectType)) {
-    selectedFeatures.delete('onboarding');
-  }
-
-  // Update the options object with the selected features before passing it down to the generator
-  options.features = Array.from(selectedFeatures);
-
-  const installResult = await installStorybook(projectType as ProjectType, packageManager, options);
-
-  // Sync features back because they may have been mutated by the generator (e.g. in case of undetected project type)
-  selectedFeatures = new Set(options.features);
-
-  if (!options.skipInstall) {
-    await packageManager.installDependencies();
-  }
-
-  if (!options.disableTelemetry) {
-    await telemetry('init', {
+  const { configDir, storybookCommand, shouldRunDev, extraAddons } =
+    await executeGeneratorExecution({
       projectType,
-      features: telemetryFeatures,
-      newUser,
-      versionSpecifier,
-      cliIntegration,
+      packageManager,
+      frameworkInfo: { builder, framework, renderer },
+      options,
+      dependencyCollector,
+      selectedFeatures,
+      language,
     });
-  }
 
-  if ([ProjectType.REACT_NATIVE, ProjectType.REACT_NATIVE_AND_RNW].includes(projectType)) {
-    logger.log(dedent`
-      ${picocolors.yellow('React Native (RN) Storybook installation is not 100% automated.')}
+  // Step 6: Install all dependencies in a single operation
+  const dependencyInstallationResult = await executeDependencyInstallation({
+    packageManager,
+    dependencyCollector,
+    skipInstall: !!options.skipInstall,
+    selectedFeatures,
+  });
 
-      To run RN Storybook, you will need to:
+  // After dependencies are installed, we must not use the dependency collector anymore
+  dependencyCollector = null;
 
-      1. Replace the contents of your app entry with the following
+  // Step 7: Configure addons (run postinstall scripts for configuration only)
+  await executeAddonConfiguration({
+    packageManager,
+    addons: extraAddons,
+    configDir,
+    dependencyInstallationResult,
+    options,
+  });
 
-      ${picocolors.inverse(' ' + "export {default} from './.rnstorybook';" + ' ')}
+  // Step 8: Print final summary
+  await executeFinalization({
+    logfile: options.logfile,
+    storybookCommand,
+  });
 
+<<<<<<< HEAD
       2. Wrap your metro config with the withStorybook enhancer function like this:
 
       ${picocolors.inverse(' ' + "const { withStorybook } = require('@storybook/react-native/metro/withStorybook');" + ' ')}
@@ -788,9 +461,17 @@ export async function doInitiate(options: CommandOptions): Promise<
       { borderStyle: 'round', padding: 1, borderColor: '#F1618C' }
     )
   );
+=======
+  // Step 9: Track telemetry
+  await telemetryService.trackInitWithContext(projectType, selectedFeatures, newUser);
+>>>>>>> upstream/next
 
   return {
-    shouldRunDev: !!options.dev && !options.skipInstall,
+    shouldRunDev:
+      !!options.dev &&
+      !options.skipInstall &&
+      shouldRunDev !== false &&
+      ErrorCollector.getErrors().length === 0,
     shouldOnboard: newUser,
     projectType,
     packageManager,
@@ -798,6 +479,19 @@ export async function doInitiate(options: CommandOptions): Promise<
   };
 }
 
+const handleCommandFailure = async (logFilePath: string | boolean | undefined): Promise<never> => {
+  const logFile = await logTracker.writeToFile(logFilePath);
+  logger.error('Storybook encountered an error during initialization');
+  logger.log(`Storybook debug logs can be found at: ${logFile}`);
+  logger.outro('Storybook exited with an error');
+  process.exit(1);
+};
+
+// cli command -> ctrl c -> exit 0
+// process.on('SIGINT', () => {
+// })
+
+/** Main initiate function with telemetry wrapper */
 export async function initiate(options: CommandOptions): Promise<void> {
   const initiateResult = await withTelemetry(
     'init',
@@ -805,8 +499,16 @@ export async function initiate(options: CommandOptions): Promise<void> {
       cliOptions: options,
       printError: (err) => !err.handled && logger.error(err),
     },
-    () => doInitiate(options)
-  );
+    async () => {
+      const result = await doInitiate(options);
+
+      logger.outro('');
+
+      return result;
+    }
+  ).catch(() => {
+    handleCommandFailure(options.logfile);
+  });
 
   if (initiateResult?.shouldRunDev) {
     await runStorybookDev(initiateResult);
@@ -817,7 +519,11 @@ export async function initiate(options: CommandOptions): Promise<void> {
 async function runStorybookDev(result: {
   projectType: ProjectType;
   packageManager: JsPackageManager;
+<<<<<<< HEAD
   storybookCommand?: string;
+=======
+  storybookCommand?: string | null;
+>>>>>>> upstream/next
   shouldOnboard: boolean;
 }): Promise<void> {
   const { projectType, packageManager, storybookCommand, shouldOnboard } = result;
@@ -827,6 +533,7 @@ async function runStorybookDev(result: {
   }
 
   try {
+<<<<<<< HEAD
     const supportsOnboarding = [
       ProjectType.REACT_SCRIPTS,
       ProjectType.REACT,
@@ -839,6 +546,16 @@ async function runStorybookDev(result: {
 
     const flags = [];
 
+=======
+    const supportsOnboarding = FeatureCompatibilityService.supportsOnboarding(projectType);
+
+    const flags = [];
+
+    if (packageManager.type === 'npm') {
+      flags.push('--silent');
+    }
+
+>>>>>>> upstream/next
     // npm needs extra -- to pass flags to the command
     // in the case of Angular, we are calling `ng run` which doesn't need the extra `--`
     if (packageManager.type === 'npm' && projectType !== ProjectType.ANGULAR) {
@@ -854,8 +571,15 @@ async function runStorybookDev(result: {
     // instead of calling 'dev' automatically, we spawn a subprocess so that it gets
     // executed directly in the user's project directory. This avoid potential issues
     // with packages running in npxs' node_modules
+<<<<<<< HEAD
     logger.log('\nRunning Storybook');
     execa.command(`${storybookCommand} ${flags.join(' ')}`, {
+=======
+    const [command, ...args] = [...storybookCommand.split(' '), ...flags];
+    executeCommand({
+      command: command,
+      args,
+>>>>>>> upstream/next
       stdio: 'inherit',
     });
   } catch {
